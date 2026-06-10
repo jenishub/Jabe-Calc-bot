@@ -354,10 +354,31 @@ async def jabe_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def session_expired(query):
+    keyboard = [[InlineKeyboardButton("🧮 New Calculation", callback_data="new_calc")]]
+    await query.edit_message_text(
+        "⚠️ This calculation session has expired (the bot was restarted).\n"
+        "Please start a new calculation.",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+STATEFUL_PREFIXES = ("dates_", "hot_", "room_", "early_", "veh_", "tour_", "alc_", "dj_", "dnc_")
+
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     ud = context.user_data
+
+    # Guard: buttons from before a restart reference a calculation
+    # that no longer exists in memory
+    if query.data.startswith(STATEFUL_PREFIXES) and "exchange_rate" not in ud:
+        await session_expired(query)
+        return
+    if query.data.startswith("tour_") and "days" not in ud:
+        await session_expired(query)
+        return
 
     if query.data == "new_calc":
         ud.clear()
