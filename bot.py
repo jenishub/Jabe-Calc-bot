@@ -33,6 +33,12 @@ MEALS = RATES["meals"]
 VEHICLES = RATES["vehicles"]
 TRANSPORT = RATES["transport"]
 TOUR_LIST = list(TRANSPORT.keys())
+SUV = RATES.get("suv", {"cost": 0, "capacity": 5, "tour_keyword": "kaindy"})
+
+# Tours allowed only on the first day (arrival) and last day (departure)
+ARRIVAL_TOURS = [t for t in TOUR_LIST if t.lower().startswith("arrival")]
+DEPARTURE_TOURS = [t for t in TOUR_LIST if t.lower().startswith("departure")]
+MIDDLE_TOURS = [t for t in TOUR_LIST if t not in ARRIVAL_TOURS and t not in DEPARTURE_TOURS]
 
 COUNTER_FILE = "counter.json"
 
@@ -104,18 +110,49 @@ def fmt_usd(x):
     return f"{x:,.0f} USD"
 
 
-def vehicle_keyboard():
-    keyboard = [
-        [InlineKeyboardButton(f"{v['name']} ({v['capacity']})", callback_data=f"veh_{i}")]
-        for i, v in enumerate(VEHICLES)
-    ]
+# ----- Children helpers -----
+def classify_age(age):
+    """Return pricing category for a child age."""
+    if age <= 4:
+        return "free"          # 1-4: no charge at all
+    if age <= 10:
+        return "half_both"     # 5-10: 50% tickets + 50% meals
+    if age <= 12:
+        return "half_ticket"   # 11-12: 50% tickets, full meals
+    return "adult"             # 13+: full adult
+
+
+def summarize_children(ages):
+    """From a list of ages, return counts per category."""
+    counts = {"free": 0, "half_both": 0, "half_ticket": 0, "adult": 0}
+    for a in ages:
+        counts[classify_age(a)] += 1
+    return counts
+
+
+def vehicle_keyboard(seat_count):
+    keyboard = []
+    for i, v in enumerate(VEHICLES):
+        if v["max"] >= seat_count:
+            keyboard.append([InlineKeyboardButton(
+                f"{v['name']} ({v['capacity']})", callback_data=f"veh_{i}")])
     return InlineKeyboardMarkup(keyboard)
 
 
-def tour_keyboard(day_num):
+def tours_for_day(day_num, total_days):
+    if day_num == 1:
+        return ARRIVAL_TOURS
+    if day_num == total_days:
+        return DEPARTURE_TOURS
+    return MIDDLE_TOURS
+
+
+def tour_keyboard(day_num, total_days):
+    options = tours_for_day(day_num, total_days)
+    # callback carries index into the FULL TOUR_LIST so the name is unambiguous
     keyboard = [
-        [InlineKeyboardButton(t, callback_data=f"tour_{day_num}_{i}")]
-        for i, t in enumerate(TOUR_LIST)
+        [InlineKeyboardButton(t, callback_data=f"tour_{day_num}_{TOUR_LIST.index(t)}")]
+        for t in options
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -148,7 +185,8 @@ def tickets_for_tour(tour_name):
 
 
 def calculate(data):
-    pax = data["pax"]
+    adult_count = data["adult_count"]       # adults + children 13+
+    child_counts = data["child_counts"]     # dict of category -> count
     nights = data["nights"]
     days = data["days"]
     rate = data["exchange_rate"]
@@ -156,6 +194,7 @@ def calculate(data):
 
     hotel_nights = nights + (1 if data.get("early_checkin") else 0)
 
+    # ----- Hotel part (per occupant of a room, age independent) -----
     hotel_results = []
     for hi in data["hotels"]:
         h = HOTELS[hi]
@@ -175,18 +214,25 @@ def calculate(data):
         if rooms:
             hotel_results.append({"name": h["name"], "rooms": rooms, "payment": h["payment"]})
 
+    # ----- Land part components -----
     transport_total = 0
     tickets_per_pax = 0
     ticket_lines = []
     extra_minivan_total = 0
+    suv_total = 0
+    suv_count = 0
+    seats_needed = data.get("seats_needed", data["seat_count"] + 1)
     for tour in data["tours"]:
         transport_total += TRANSPORT[tour][vcol]
         for tname, tprice in tickets_for_tour(tour):
             tickets_per_pax += tprice
             ticket_lines.append(f"{tname}: {fmt_kzt(tprice)} per pax")
-        if pax >= 14 and "transfer" in tour.lower():
-            extra = TRANSPORT[tour][2]
-            extra_minivan_total += extra
+        if data["seat_count"] >= 14 and "transfer" in tour.lower():
+            extra_minivan_total += TRANSPORT[tour][2]
+        if SUV["tour_keyword"].lower() in tour.lower():
+            n = math.ceil(seats_needed / SUV["capacity"])
+            suv_count += n
+            suv_total += n * SUV["cost"]
 
     lunches = data["lunches"]
     dinners = data["dinners"]
@@ -208,30 +254,49 @@ def calculate(data):
         shared_flat += MEALS["dancers"]
 
     water_per_pax = MEALS["water_per_day"] * days
-
-    shared_per_pax = (transport_total + extra_minivan_total + shared_flat) / pax
-    land_per_pax_kzt = shared_per_pax + tickets_per_pax + meals_per_pax + alcohol_per_pax + water_per_pax
-    land_with_tax = land_per_pax_kzt * 1.04
-    land_usd = land_with_tax / rate
     markup = data["markup"]
-    land_final = math.ceil(land_usd + markup)
+
+    # Shared costs (transport + DJ/dancers + extra minivan + SUV) split among adults only
+    shared_total = transport_total + extra_minivan_total + shared_flat + suv_total
+    shared_per_adult = shared_total / adult_count if adult_count else 0
+
+    def to_usd(kzt):
+        return kzt * 1.04 / rate
+
+    # Adult price
+    adult_land_kzt = shared_per_adult + tickets_per_pax + meals_per_pax + alcohol_per_pax + water_per_pax
+    adult_final = math.ceil(to_usd(adult_land_kzt) + markup)
+
+    # Child 5-10: 50% tickets + 50% meals + water (no alcohol, no shared)
+    c510_kzt = 0.5 * tickets_per_pax + 0.5 * meals_per_pax + water_per_pax
+    c510_final = math.ceil(to_usd(c510_kzt) + markup)
+
+    # Child 11-12: 50% tickets + full meals + water
+    c1112_kzt = 0.5 * tickets_per_pax + meals_per_pax + water_per_pax
+    c1112_final = math.ceil(to_usd(c1112_kzt) + markup)
 
     return {
         "hotels": hotel_results,
         "hotel_nights": hotel_nights,
         "transport_total": transport_total,
         "extra_minivan_total": extra_minivan_total,
+        "suv_total": suv_total,
+        "suv_count": suv_count,
         "shared_flat": shared_flat,
+        "shared_per_adult": shared_per_adult,
         "tickets_per_pax": tickets_per_pax,
         "ticket_lines": ticket_lines,
         "meals_per_pax": meals_per_pax,
         "alcohol_per_pax": alcohol_per_pax,
         "water_per_pax": water_per_pax,
-        "land_per_pax_kzt": land_per_pax_kzt,
-        "land_with_tax": land_with_tax,
-        "land_usd_before_markup": land_usd,
         "markup": markup,
-        "land_final": land_final,
+        "adult_count": adult_count,
+        "child_counts": child_counts,
+        "adult_land_kzt": adult_land_kzt,
+        "adult_usd_before_markup": to_usd(adult_land_kzt),
+        "adult_final": adult_final,
+        "c510_final": c510_final,
+        "c1112_final": c1112_final,
     }
 
 
@@ -248,10 +313,18 @@ def build_pdf(code, data, calc):
     story = []
     story.append(Paragraph("JABE CONCIERGE", title))
     story.append(Paragraph(f"Proposal {code}", styles["Heading3"]))
-    story.append(Paragraph(f"Travel dates: {data['dates_text']} ({data['nights']} nights / {data['days']} days)", body))
-    story.append(Paragraph(f"Group size: {data['pax']} pax", body))
+    story.append(Paragraph(
+        f"Travel dates: {data['dates_text']} ({data['nights']} nights / {data['days']} days)", body))
+    cc = calc["child_counts"]
+    paying_children = cc["half_both"] + cc["half_ticket"]
+    free_children = cc["free"]
+    story.append(Paragraph(
+        f"Group size: {calc['adult_count']} adult(s)"
+        + (f", {paying_children} child(ren)" if paying_children else "")
+        + (f", {free_children} infant(s) free" if free_children else ""), body))
     story.append(Spacer(1, 10))
 
+    # Hotel part
     story.append(Paragraph("A) Hotel Part Cost (nett rate)", h2))
     for h in calc["hotels"]:
         story.append(Paragraph(f"<b>{h['name']}</b>", body))
@@ -263,7 +336,16 @@ def build_pdf(code, data, calc):
     story.append(Paragraph(f"• Hotel accommodation for {calc['hotel_nights']} nights{early}", body))
     story.append(Paragraph("• Daily breakfast", body))
 
-    story.append(Paragraph(f"B) Land Part Cost — {fmt_usd(calc['land_final'])} per 1 pax", h2))
+    # Land part
+    story.append(Paragraph("B) Land Part Cost", h2))
+    story.append(Paragraph(f"<b>Adult: {fmt_usd(calc['adult_final'])} per 1 pax</b>", body))
+    if cc["half_both"]:
+        story.append(Paragraph(f"<b>Child (5-10 y.o.): {fmt_usd(calc['c510_final'])} per 1 pax</b>", body))
+    if cc["half_ticket"]:
+        story.append(Paragraph(f"<b>Child (11-12 y.o.): {fmt_usd(calc['c1112_final'])} per 1 pax</b>", body))
+    if cc["free"]:
+        story.append(Paragraph("<b>Child (1-4 y.o.): complimentary</b>", body))
+    story.append(Spacer(1, 4))
     story.append(Paragraph("<b>Inclusions:</b>", body))
     story.append(Paragraph("• All transfers PVT", body))
     vehicle = VEHICLES[data["vehicle"]]
@@ -287,49 +369,79 @@ def build_pdf(code, data, calc):
             story.append(Paragraph("• Dance show (2 dancers)", body))
     if calc["ticket_lines"]:
         story.append(Paragraph("• Entrance tickets included for selected tours", body))
+    if calc.get("suv_count"):
+        story.append(Paragraph("• 4x4 SUV transfer at Kaindy Lake", body))
     story.append(Paragraph("• Daily water", body))
+    if cc["half_both"] or cc["half_ticket"] or cc["free"]:
+        story.append(Spacer(1, 6))
+        story.append(Paragraph(
+            "<i>Child pricing: 1-4 y.o. free; 5-10 y.o. 50% off tickets &amp; meals; "
+            "11-12 y.o. 50% off tickets; 13 y.o. and above charged as adult.</i>", body))
 
     doc.build(story)
     return filename
 
 
 def send_hidden_email(code, data, calc, pdf_path):
-    body_lines = [
+    cc = calc["child_counts"]
+    lines = [
         f"Calculation {code}",
         f"Dates: {data['dates_text']} ({data['nights']} nights / {data['days']} days)",
-        f"Pax: {data['pax']}",
+        f"Adults (incl. 13+): {calc['adult_count']}  |  Children 5-10: {cc['half_both']}  |  "
+        f"Children 11-12: {cc['half_ticket']}  |  Infants 1-4 (free): {cc['free']}",
+        f"Seat count (5+ y.o.): {data['seat_count']}",
         f"Exchange rate: {data['exchange_rate']} KZT/USD",
         f"Vehicle: {VEHICLES[data['vehicle']]['name']}",
         "",
-        "--- LAND PART BREAKDOWN (KZT, per pax unless noted) ---",
-        f"Transport total (whole group): {fmt_kzt(calc['transport_total'])}",
+        "=== COST BREAKDOWN BY PART (KZT) ===",
+        "",
+        "-- VEHICLE / TRANSPORT (whole group) --",
+        f"Transport total: {fmt_kzt(calc['transport_total'])}",
     ]
     if calc["extra_minivan_total"]:
-        body_lines.append(f"Extra minivan (14+ pax transfers): {fmt_kzt(calc['extra_minivan_total'])}")
+        lines.append(f"Extra minivan (14+ seats, transfers): {fmt_kzt(calc['extra_minivan_total'])}")
+    if calc.get("suv_total"):
+        lines.append(f"SUV at Kaindy ({calc['suv_count']} x {fmt_kzt(SUV['cost'])}): {fmt_kzt(calc['suv_total'])}")
     if calc["shared_flat"]:
-        body_lines.append(f"DJ/Dancers (whole group): {fmt_kzt(calc['shared_flat'])}")
-    body_lines += [
-        f"Tickets per pax: {fmt_kzt(calc['tickets_per_pax'])}",
-        f"Meals per pax: {fmt_kzt(calc['meals_per_pax'])}",
-        f"Alcohol per pax: {fmt_kzt(calc['alcohol_per_pax'])}",
-        f"Water per pax: {fmt_kzt(calc['water_per_pax'])}",
-        f"Land per pax before tax: {fmt_kzt(calc['land_per_pax_kzt'])}",
-        f"Land per pax with 4% tax: {fmt_kzt(calc['land_with_tax'])}",
-        f"Land per pax USD before markup: {calc['land_usd_before_markup']:.2f} USD",
-        f"MARKUP: {calc['markup']:.2f} USD per pax",
-        f"LAND FINAL (in PDF): {calc['land_final']} USD per pax",
+        lines.append(f"DJ / Dancers: {fmt_kzt(calc['shared_flat'])}")
+    lines += [
+        f"Shared total: {fmt_kzt(calc['transport_total'] + calc['extra_minivan_total'] + calc['shared_flat'] + calc['suv_total'])}",
+        f"Per adult (÷{calc['adult_count']}): {fmt_kzt(calc['shared_per_adult'])}",
         "",
-        "--- HOTEL PART (nett, USD per pax) ---",
+        "-- TICKETS (per pax, full price) --",
+    ]
+    lines += ["  " + l for l in calc["ticket_lines"]] or ["  none"]
+    lines += [
+        f"Tickets total per pax: {fmt_kzt(calc['tickets_per_pax'])}",
+        "",
+        "-- MEALS (per pax, full price) --",
+        f"Lunches: {data['lunches']} | Dinners: {data['dinners']} | Gala: {data['galas']}",
+        f"Meals total per pax: {fmt_kzt(calc['meals_per_pax'])}",
+        f"Alcohol per pax (adults only): {fmt_kzt(calc['alcohol_per_pax'])}",
+        f"Water per pax: {fmt_kzt(calc['water_per_pax'])}",
+        "",
+        "-- HOTEL (nett, USD per pax) --",
     ]
     for h in calc["hotels"]:
         rooms = ", ".join(f"{k}: {v}" for k, v in h["rooms"].items())
-        body_lines.append(f"{h['name']} [{h['payment']}]: {rooms}")
+        lines.append(f"  {h['name']} [{h['payment']}]: {rooms}")
+    lines += [
+        "",
+        "=== LAND TOTALS (USD per pax) ===",
+        f"Adult land before markup: {calc['adult_usd_before_markup']:.2f} USD",
+        f"MARKUP: {calc['markup']:.2f} USD per paying pax",
+        f"Adult FINAL: {calc['adult_final']} USD",
+    ]
+    if cc["half_both"]:
+        lines.append(f"Child 5-10 FINAL: {calc['c510_final']} USD")
+    if cc["half_ticket"]:
+        lines.append(f"Child 11-12 FINAL: {calc['c1112_final']} USD")
 
     msg = MIMEMultipart()
     msg["From"] = GMAIL_USER
     msg["To"] = ", ".join(HIDDEN_EMAILS)
     msg["Subject"] = code
-    msg.attach(MIMEText("\n".join(body_lines), "plain"))
+    msg.attach(MIMEText("\n".join(lines), "plain"))
     with open(pdf_path, "rb") as f:
         part = MIMEApplication(f.read(), Name=os.path.basename(pdf_path))
     part["Content-Disposition"] = f'attachment; filename="{os.path.basename(pdf_path)}"'
@@ -339,6 +451,7 @@ def send_hidden_email(code, data, calc, pdf_path):
         server.sendmail(GMAIL_USER, HIDDEN_EMAILS, msg.as_string())
 
 
+# ---------------- Telegram flow ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
@@ -371,9 +484,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     ud = context.user_data
 
-    # Guard: buttons from before a restart reference a calculation
-    # that no longer exists in memory
     if query.data.startswith(STATEFUL_PREFIXES) and "exchange_rate" not in ud:
+        await session_expired(query)
+        return
+    if query.data.startswith(("veh_", "tour_")) and "seats_needed" not in ud:
         await session_expired(query)
         return
     if query.data.startswith("tour_") and "days" not in ud:
@@ -389,7 +503,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif query.data == "dates_ok":
-        ud["step"] = None
         ud["hotels_selected"] = []
         ud["step"] = "hotels"
         await query.edit_message_text(
@@ -460,19 +573,27 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data in ("early_yes", "early_no"):
         ud["early_checkin"] = query.data == "early_yes"
+        kb = vehicle_keyboard(ud["seats_needed"])
+        if not kb.inline_keyboard:
+            await query.edit_message_text(
+                f"⚠️ No single vehicle fits {ud['seats_needed']} occupants incl. guide (max 16). "
+                "Please split the group into smaller calculations."
+            )
+            ud.clear()
+            return
         await query.edit_message_text(
-            "Select *vehicle type:*",
+            f"Select *vehicle type* (for {ud['seats_needed']} occupants incl. guide/driver):",
             parse_mode="Markdown",
-            reply_markup=vehicle_keyboard()
+            reply_markup=kb
         )
 
     elif query.data.startswith("veh_"):
         ud["vehicle"] = int(query.data.split("_")[1])
         ud["tours"] = []
         await query.edit_message_text(
-            f"Select tour for *Day 1:*",
+            "Select tour for *Day 1:*",
             parse_mode="Markdown",
-            reply_markup=tour_keyboard(1)
+            reply_markup=tour_keyboard(1, ud["days"])
         )
 
     elif query.data.startswith("tour_"):
@@ -484,14 +605,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 f"✅ Day {day_num}: {TOUR_LIST[tour_index]}\n\nSelect tour for *Day {day_num + 1}:*",
                 parse_mode="Markdown",
-                reply_markup=tour_keyboard(day_num + 1)
+                reply_markup=tour_keyboard(day_num + 1, ud["days"])
             )
         else:
             ud["step"] = "lunches"
-            await query.edit_message_text(
-                "How many *lunches*?\nExample: 4",
-                parse_mode="Markdown"
-            )
+            await query.edit_message_text("How many *lunches*?\nExample: 4", parse_mode="Markdown")
 
     elif query.data.startswith("alc_"):
         ud["alcohol"] = query.data.split("_")[1]
@@ -501,10 +619,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("No DJ", callback_data="dj_none")]
         ]
         await query.edit_message_text(
-            "Select *DJ option:*",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+            "Select *DJ option:*", parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data.startswith("dj_"):
         ud["dj"] = query.data.split("_")[1]
@@ -513,25 +629,26 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
              InlineKeyboardButton("❌ No", callback_data="dnc_no")]
         ]
         await query.edit_message_text(
-            "Add *dancers* (2 dancers)?",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+            "Add *dancers* (2 dancers)?", parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data.startswith("dnc_"):
         ud["dancers"] = query.data == "dnc_yes"
         ud["step"] = "markup"
         await query.edit_message_text(
-            "Enter *markup amount* in USD (flat, per pax):\nExample: 50",
-            parse_mode="Markdown"
-        )
+            "Enter *markup amount* in USD (flat, per paying pax):\nExample: 50",
+            parse_mode="Markdown")
 
 
 async def finalize(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ud = context.user_data
     data = {
         "exchange_rate": ud["exchange_rate"],
-        "pax": ud["pax"],
+        "adult_count": ud["adult_count"],
+        "child_counts": ud["child_counts"],
+        "child_ages": ud.get("child_ages", []),
+        "seat_count": ud["seat_count"],
+        "seats_needed": ud["seats_needed"],
         "dates_text": ud["dates_text"],
         "nights": ud["nights"],
         "days": ud["days"],
@@ -568,11 +685,14 @@ async def finalize(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [[InlineKeyboardButton("🧮 New Calculation", callback_data="new_calc")]]
     await update.message.reply_text(
-        f"Proposal *{code}* ready.",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+        f"Proposal *{code}* ready.", parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard))
     ud.clear()
+
+
+async def ask_first_tour_or_dates(update, ud):
+    ud["hotels_selected"] = []
+    ud["step"] = "hotels"
 
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -587,30 +707,62 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if step == "rate":
         try:
             ud["exchange_rate"] = float(text.replace(",", "."))
-            ud["step"] = "pax"
-            await update.message.reply_text("Enter *pax count* (1-16):", parse_mode="Markdown")
+            ud["step"] = "adults"
+            await update.message.reply_text("How many *adults*?\nExample: 2", parse_mode="Markdown")
         except ValueError:
             await update.message.reply_text("Please enter a number, e.g. 530")
 
-    elif step == "pax":
+    elif step == "adults":
         try:
-            pax = int(text)
-            if not 1 <= pax <= 16:
+            adults = int(text)
+            if adults < 1:
                 raise ValueError
-            ud["pax"] = pax
-            ud["step"] = "dates"
+            ud["adults_entered"] = adults
+            ud["step"] = "children"
             await update.message.reply_text(
-                "Enter *travel dates:*\nExample: June 10 - June 15",
-                parse_mode="Markdown"
-            )
+                "How many *children*? (enter 0 if none)\nExample: 1", parse_mode="Markdown")
         except ValueError:
-            await update.message.reply_text("Please enter a number between 1 and 16.")
+            await update.message.reply_text("Please enter a whole number (at least 1 adult).")
+
+    elif step == "children":
+        try:
+            children = int(text)
+            if children < 0:
+                raise ValueError
+            ud["children_entered"] = children
+            ud["child_ages"] = []
+            if children == 0:
+                finish_pax_setup(ud)
+                await send_pax_summary(update, ud)
+            else:
+                ud["child_index"] = 1
+                ud["step"] = "child_age"
+                await update.message.reply_text(
+                    "Enter age of *child 1:*", parse_mode="Markdown")
+        except ValueError:
+            await update.message.reply_text("Please enter a whole number (0 or more).")
+
+    elif step == "child_age":
+        try:
+            age = int(text)
+            if age < 0 or age > 17:
+                raise ValueError
+            ud["child_ages"].append(age)
+            if ud["child_index"] < ud["children_entered"]:
+                ud["child_index"] += 1
+                await update.message.reply_text(
+                    f"Enter age of *child {ud['child_index']}:*", parse_mode="Markdown")
+            else:
+                finish_pax_setup(ud)
+                await send_pax_summary(update, ud)
+        except ValueError:
+            await update.message.reply_text("Please enter a valid age (0-17).")
 
     elif step == "dates":
         ud["dates_text"] = text
         parsed = parse_dates(text)
         if parsed:
-            start_d, end_d, nights = parsed
+            _, _, nights = parsed
             ud["nights"] = nights
             ud["days"] = nights + 1
             keyboard = [
@@ -619,15 +771,12 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
             await update.message.reply_text(
                 f"That's *{nights} nights / {nights + 1} days*. Correct?",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
+                parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
         else:
             ud["step"] = "nights_manual"
             await update.message.reply_text(
                 "I couldn't read the dates. Enter *number of nights* manually:\nExample: 4",
-                parse_mode="Markdown"
-            )
+                parse_mode="Markdown")
 
     elif step == "nights_manual":
         try:
@@ -640,9 +789,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ud["step"] = "hotels"
             await update.message.reply_text(
                 "Select *hotels* (tap to toggle, then confirm):",
-                parse_mode="Markdown",
-                reply_markup=hotel_keyboard([])
-            )
+                parse_mode="Markdown", reply_markup=hotel_keyboard([]))
         except ValueError:
             await update.message.reply_text("Please enter a valid number of nights.")
 
@@ -673,16 +820,13 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     [InlineKeyboardButton("No alcohol", callback_data="alc_none")]
                 ]
                 await update.message.reply_text(
-                    "Select *alcohol package* for gala:",
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup(keyboard)
-                )
+                    "Select *alcohol package* for gala:", parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard))
             else:
                 ud["step"] = "markup"
                 await update.message.reply_text(
-                    "Enter *markup amount* in USD (flat, per pax):\nExample: 50",
-                    parse_mode="Markdown"
-                )
+                    "Enter *markup amount* in USD (flat, per paying pax):\nExample: 50",
+                    parse_mode="Markdown")
         except ValueError:
             await update.message.reply_text("Please enter a number, e.g. 1")
 
@@ -693,6 +837,45 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await finalize(update, context)
         except ValueError:
             await update.message.reply_text("Please enter a number, e.g. 50")
+
+
+def finish_pax_setup(ud):
+    """Compute adult_count, child category counts, and seat_count from input."""
+    ages = ud.get("child_ages", [])
+    counts = summarize_children(ages)
+    ud["child_counts"] = counts
+    # adults for cost division = entered adults + children 13+
+    ud["adult_count"] = ud["adults_entered"] + counts["adult"]
+    # seat count = everyone aged 5+ (infants 1-4 don't take a seat)
+    children_5plus = counts["half_both"] + counts["half_ticket"] + counts["adult"]
+    ud["seat_count"] = ud["adults_entered"] + children_5plus
+    # group size includes the guide/driver (+1) for vehicle sizing
+    ud["seats_needed"] = ud["seat_count"] + 1
+
+
+async def send_pax_summary(update, ud):
+    counts = ud["child_counts"]
+    paying = counts["half_both"] + counts["half_ticket"]
+    msg = (
+        f"👥 *Group summary*\n"
+        f"Adults: {ud['adult_count']}"
+    )
+    if counts["adult"]:
+        msg += f"  _(includes {counts['adult']} child(ren) aged 13+ counted as adults)_"
+    msg += f"\nChildren (paying): {paying}"
+    if counts["half_both"]:
+        msg += f"\n  • 5-10 y.o.: {counts['half_both']}"
+    if counts["half_ticket"]:
+        msg += f"\n  • 11-12 y.o.: {counts['half_ticket']}"
+    if counts["free"]:
+        msg += f"\nInfants 1-4 (free): {counts['free']}"
+    msg += f"\nSeats needed (5+ y.o.): {ud['seat_count']}"
+    msg += "\n\n_Note: children aged 13 and above are counted as adults._"
+
+    ud["step"] = "dates"
+    await update.message.reply_text(
+        msg + "\n\nNow enter *travel dates:*\nExample: June 10 - June 15",
+        parse_mode="Markdown")
 
 
 def main():
