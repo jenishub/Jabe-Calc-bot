@@ -821,6 +821,9 @@ async def finalize(update: Update, context: ContextTypes.DEFAULT_TYPE):
     calc = calculate(data)
     pdf_path = build_pdf(code, data, calc)
 
+    # Works whether finalize was triggered by a text message or a button click
+    msg = update.message or (update.callback_query.message if update.callback_query else None)
+
     # Persist a lightweight record of the quote
     try:
         save_quote({
@@ -836,9 +839,9 @@ async def finalize(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"Quote save failed: {e}")
 
-    await update.message.reply_text("✅ Calculation complete! Sending proposal...")
+    await msg.reply_text("✅ Calculation complete! Sending proposal...")
     with open(pdf_path, "rb") as f:
-        await update.message.reply_document(document=f, filename=pdf_path)
+        await msg.reply_document(document=f, filename=pdf_path)
 
     try:
         send_hidden_email(code, data, calc, pdf_path)
@@ -851,8 +854,8 @@ async def finalize(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
     keyboard = [[InlineKeyboardButton("🧮 New Calculation", callback_data="new_calc")]]
-    await update.message.reply_text(
-        f"Proposal *{code}* ready.", parse_mode="Markdown",
+    await msg.reply_text(
+        f"Proposal {code} ready.",
         reply_markup=InlineKeyboardMarkup(keyboard))
     ud.clear()
 
