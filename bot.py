@@ -40,7 +40,40 @@ ARRIVAL_TOURS = [t for t in TOUR_LIST if t.lower().startswith("arrival")]
 DEPARTURE_TOURS = [t for t in TOUR_LIST if t.lower().startswith("departure")]
 MIDDLE_TOURS = [t for t in TOUR_LIST if t not in ARRIVAL_TOURS and t not in DEPARTURE_TOURS]
 
-COUNTER_FILE = "counter.json"
+COUNTER_FILE = os.path.join(os.getenv("DATA_DIR", "."), "counter.json")
+QUOTES_FILE = os.path.join(os.getenv("DATA_DIR", "."), "quotes.json")
+
+# Ensure the data directory exists (Render Disk mount or local folder)
+os.makedirs(os.getenv("DATA_DIR", "."), exist_ok=True)
+
+# Access whitelist: comma-separated Telegram IDs in ALLOWED_IDS env var.
+# If unset/empty, the bot allows everyone (with a startup warning).
+_raw_ids = os.getenv("ALLOWED_IDS", "").replace(" ", "")
+ALLOWED_IDS = {int(x) for x in _raw_ids.split(",") if x.isdigit()}
+
+
+def is_authorized(update):
+    if not ALLOWED_IDS:
+        return True
+    user = update.effective_user
+    return user is not None and user.id in ALLOWED_IDS
+
+
+def load_quotes():
+    if os.path.exists(QUOTES_FILE):
+        try:
+            with open(QUOTES_FILE, "r") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return []
+    return []
+
+
+def save_quote(record):
+    quotes = load_quotes()
+    quotes.append(record)
+    with open(QUOTES_FILE, "w") as f:
+        json.dump(quotes, f, indent=2)
 
 MONTHS = {
     "january": 1, "february": 2, "march": 3, "april": 4, "may": 5,
@@ -452,13 +485,49 @@ def send_hidden_email(code, data, calc, pdf_path):
 
 
 # ---------------- Telegram flow ----------------
+async def my_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    await update.message.reply_text(
+        f"Your Telegram ID is: `{user.id}`\n\n"
+        "Share this with the admin to be granted access.",
+        parse_mode="Markdown"
+    )
+
+
+async def list_quotes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        await update.message.reply_text("⛔ You are not authorized to use this bot.")
+        return
+    quotes = load_quotes()
+    if not quotes:
+        await update.message.reply_text("No saved quotes yet.")
+        return
+    recent = quotes[-15:]
+    lines = ["📑 *Recent quotes:*\n"]
+    for q in recent:
+        lines.append(
+            f"*{q['code']}* | {q.get('dates_text', '')} | "
+            f"{q.get('adult_count', '?')} ad | Adult {q.get('adult_final', '?')} USD"
+        )
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
+        return
+    if not is_authorized(update):
+        await update.message.reply_text(
+            "⛔ You are not authorized to use this bot.\n"
+            "Send /myid and share your ID with the admin to request access."
+        )
         return
     await jabe_menu(update, context)
 
 
 async def jabe_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        await update.message.reply_text("⛔ You are not authorized to use this bot.")
+        return
     context.user_data.clear()
     keyboard = [[InlineKeyboardButton("🧮 New Calculation", callback_data="new_calc")]]
     await update.message.reply_text(
@@ -483,6 +552,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     ud = context.user_data
+
+    if not is_authorized(update):
+        await query.edit_message_text("⛔ You are not authorized to use this bot.")
+        return
 
     if query.data.startswith(STATEFUL_PREFIXES) and "exchange_rate" not in ud:
         await session_expired(query)
@@ -634,10 +707,89 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data.startswith("dnc_"):
         ud["dancers"] = query.data == "dnc_yes"
-        ud["step"] = "markup"
+        if ud.pop("editing", False):
+            await show_review(query.message, ud)
+        else:
+            ud["step"] = "markup"
+            await query.edit_message_text(
+                "Enter *markup amount* in USD (flat, per paying pax):\nExample: 50",
+                parse_mode="Markdown")
+
+    elif query.data == "gen_proposal":
+        if "markup" not in ud:
+            await session_expired(query)
+            return
+        await finalize(update, context)
+
+    elif query.data == "edit_rate":
+        if "exchange_rate" not in ud:
+            await session_expired(query)
+            return
+        ud["step"] = "edit_rate"
         await query.edit_message_text(
-            "Enter *markup amount* in USD (flat, per paying pax):\nExample: 50",
-            parse_mode="Markdown")
+            "Enter the new *exchange rate* (KZT per 1 USD):", parse_mode="Markdown")
+
+    elif query.data == "edit_markup":
+        if "markup" not in ud:
+            await session_expired(query)
+            return
+        ud["step"] = "edit_markup"
+        await query.edit_message_text(
+            "Enter the new *markup amount* in USD (per paying pax):", parse_mode="Markdown")
+
+    elif query.data == "edit_meals":
+        if "exchange_rate" not in ud:
+            await session_expired(query)
+            return
+        ud["step"] = "edit_lunches"
+        await query.edit_message_text("How many *lunches*?", parse_mode="Markdown")
+
+
+def build_review_text(ud):
+    counts = ud.get("child_counts", {"free": 0, "half_both": 0, "half_ticket": 0, "adult": 0})
+    paying = counts["half_both"] + counts["half_ticket"]
+    veh = VEHICLES[ud["vehicle"]]["name"]
+    hotels = ", ".join(HOTELS[i]["name"] for i in ud["hotels_selected"])
+    rooms = ", ".join(["Single", "Double", "Triple"][i] for i in ud["rooms_selected"])
+    lines = [
+        "📋 *Please review before generating:*",
+        "",
+        f"💱 Exchange rate: {ud['exchange_rate']} KZT/USD",
+        f"👥 Adults: {ud['adult_count']}"
+        + (f", paying children: {paying}" if paying else "")
+        + (f", free infants: {counts['free']}" if counts['free'] else ""),
+        f"🪑 Seats incl. guide: {ud['seats_needed']}",
+        f"📅 Dates: {ud['dates_text']} ({ud['nights']}n/{ud['days']}d)",
+        f"🏨 Hotels: {hotels}",
+        f"🛏️ Rooms: {rooms}",
+        f"🔑 Early check-in: {'Yes' if ud.get('early_checkin') else 'No'}",
+        f"🚐 Vehicle: {veh}",
+        f"🗺️ Tours: " + "; ".join(f"D{i+1} {t}" for i, t in enumerate(ud["tours"])),
+        f"🍴 Meals: {ud['lunches']} lunch, {ud['dinners']} dinner, {ud['galas']} gala",
+    ]
+    if ud["galas"] > 0:
+        lines.append(
+            f"🥂 Gala extras: alcohol={ud.get('alcohol', 'none')}, "
+            f"dj={ud.get('dj', 'none')}, dancers={'yes' if ud.get('dancers') else 'no'}"
+        )
+    lines.append(f"💵 Markup: {ud['markup']} USD per paying pax")
+    return "\n".join(lines)
+
+
+def review_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Generate Proposal", callback_data="gen_proposal")],
+        [InlineKeyboardButton("✏️ Exchange Rate", callback_data="edit_rate"),
+         InlineKeyboardButton("✏️ Markup", callback_data="edit_markup")],
+        [InlineKeyboardButton("✏️ Meals & Gala", callback_data="edit_meals")],
+        [InlineKeyboardButton("🔄 Start Over", callback_data="new_calc")],
+    ])
+
+
+async def show_review(message, ud):
+    ud["step"] = None
+    await message.reply_text(
+        build_review_text(ud), parse_mode="Markdown", reply_markup=review_keyboard())
 
 
 async def finalize(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -669,6 +821,21 @@ async def finalize(update: Update, context: ContextTypes.DEFAULT_TYPE):
     calc = calculate(data)
     pdf_path = build_pdf(code, data, calc)
 
+    # Persist a lightweight record of the quote
+    try:
+        save_quote({
+            "code": code,
+            "created": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "dates_text": data["dates_text"],
+            "adult_count": data["adult_count"],
+            "adult_final": calc["adult_final"],
+            "c510_final": calc["c510_final"],
+            "c1112_final": calc["c1112_final"],
+            "markup": data["markup"],
+        })
+    except Exception as e:
+        print(f"Quote save failed: {e}")
+
     await update.message.reply_text("✅ Calculation complete! Sending proposal...")
     with open(pdf_path, "rb") as f:
         await update.message.reply_document(document=f, filename=pdf_path)
@@ -697,6 +864,8 @@ async def ask_first_tour_or_dates(update, ud):
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ud = context.user_data
+    if not is_authorized(update):
+        return
     if update.effective_chat.type != "private" and not ud.get("step"):
         return
     step = ud.get("step")
@@ -833,10 +1002,62 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif step == "markup":
         try:
             ud["markup"] = float(text.replace(",", "."))
-            ud["step"] = None
-            await finalize(update, context)
+            await show_review(update.message, ud)
         except ValueError:
             await update.message.reply_text("Please enter a number, e.g. 50")
+
+    # ----- single-field edits from the review screen -----
+    elif step == "edit_rate":
+        try:
+            ud["exchange_rate"] = float(text.replace(",", "."))
+            await show_review(update.message, ud)
+        except ValueError:
+            await update.message.reply_text("Please enter a number, e.g. 530")
+
+    elif step == "edit_markup":
+        try:
+            ud["markup"] = float(text.replace(",", "."))
+            await show_review(update.message, ud)
+        except ValueError:
+            await update.message.reply_text("Please enter a number, e.g. 50")
+
+    elif step == "edit_lunches":
+        try:
+            ud["lunches"] = int(text)
+            ud["step"] = "edit_dinners"
+            await update.message.reply_text("How many *dinners*?", parse_mode="Markdown")
+        except ValueError:
+            await update.message.reply_text("Please enter a number, e.g. 4")
+
+    elif step == "edit_dinners":
+        try:
+            ud["dinners"] = int(text)
+            ud["step"] = "edit_galas"
+            await update.message.reply_text("How many *gala dinners*?", parse_mode="Markdown")
+        except ValueError:
+            await update.message.reply_text("Please enter a number, e.g. 3")
+
+    elif step == "edit_galas":
+        try:
+            ud["galas"] = int(text)
+            ud["step"] = None
+            if ud["galas"] > 0:
+                ud["editing"] = True
+                keyboard = [
+                    [InlineKeyboardButton("Local (vodka) — 1,500/pax", callback_data="alc_local")],
+                    [InlineKeyboardButton("Premium (red label, wines) — 3,500/pax", callback_data="alc_premium")],
+                    [InlineKeyboardButton("No alcohol", callback_data="alc_none")]
+                ]
+                await update.message.reply_text(
+                    "Select *alcohol package* for gala:", parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard))
+            else:
+                ud["alcohol"] = "none"
+                ud["dj"] = "none"
+                ud["dancers"] = False
+                await show_review(update.message, ud)
+        except ValueError:
+            await update.message.reply_text("Please enter a number, e.g. 1")
 
 
 def finish_pax_setup(ud):
@@ -882,9 +1103,14 @@ def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("jabe", jabe_menu))
+    app.add_handler(CommandHandler("myid", my_id))
+    app.add_handler(CommandHandler("quotes", list_quotes))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    print("Calculator bot is running...")
+    if ALLOWED_IDS:
+        print(f"Calculator bot running. Whitelist active for {len(ALLOWED_IDS)} ID(s).")
+    else:
+        print("Calculator bot running. WARNING: ALLOWED_IDS not set — bot is open to everyone.")
     app.run_polling()
 
 
