@@ -503,13 +503,13 @@ async def list_quotes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No saved quotes yet.")
         return
     recent = quotes[-15:]
-    lines = ["📑 *Recent quotes:*\n"]
+    lines = ["📑 Recent quotes:\n"]
     for q in recent:
         lines.append(
-            f"*{q['code']}* | {q.get('dates_text', '')} | "
+            f"{q['code']} | {q.get('dates_text', '')} | "
             f"{q.get('adult_count', '?')} ad | Adult {q.get('adult_final', '?')} USD"
         )
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await update.message.reply_text("\n".join(lines))
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -646,16 +646,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data in ("early_yes", "early_no"):
         ud["early_checkin"] = query.data == "early_yes"
-        kb = vehicle_keyboard(ud["seats_needed"])
+        kb = vehicle_keyboard(ud["seat_count"])
         if not kb.inline_keyboard:
             await query.edit_message_text(
-                f"⚠️ No single vehicle fits {ud['seats_needed']} occupants incl. guide (max 16). "
+                f"⚠️ No single vehicle fits {ud['seat_count']} passengers (max 16). "
                 "Please split the group into smaller calculations."
             )
             ud.clear()
             return
         await query.edit_message_text(
-            f"Select *vehicle type* (for {ud['seats_needed']} occupants incl. guide/driver):",
+            f"Select *vehicle type* (for {ud['seat_count']} passengers):",
             parse_mode="Markdown",
             reply_markup=kb
         )
@@ -752,19 +752,19 @@ def build_review_text(ud):
     hotels = ", ".join(HOTELS[i]["name"] for i in ud["hotels_selected"])
     rooms = ", ".join(["Single", "Double", "Triple"][i] for i in ud["rooms_selected"])
     lines = [
-        "📋 *Please review before generating:*",
+        "📋 PLEASE REVIEW BEFORE GENERATING:",
         "",
         f"💱 Exchange rate: {ud['exchange_rate']} KZT/USD",
         f"👥 Adults: {ud['adult_count']}"
         + (f", paying children: {paying}" if paying else "")
         + (f", free infants: {counts['free']}" if counts['free'] else ""),
-        f"🪑 Seats incl. guide: {ud['seats_needed']}",
+        f"🪑 Passengers (5+ y.o.): {ud['seat_count']}",
         f"📅 Dates: {ud['dates_text']} ({ud['nights']}n/{ud['days']}d)",
         f"🏨 Hotels: {hotels}",
         f"🛏️ Rooms: {rooms}",
         f"🔑 Early check-in: {'Yes' if ud.get('early_checkin') else 'No'}",
         f"🚐 Vehicle: {veh}",
-        f"🗺️ Tours: " + "; ".join(f"D{i+1} {t}" for i, t in enumerate(ud["tours"])),
+        "🗺️ Tours: " + "; ".join(f"D{i+1} {t}" for i, t in enumerate(ud["tours"])),
         f"🍴 Meals: {ud['lunches']} lunch, {ud['dinners']} dinner, {ud['galas']} gala",
     ]
     if ud["galas"] > 0:
@@ -788,8 +788,8 @@ def review_keyboard():
 
 async def show_review(message, ud):
     ud["step"] = None
-    await message.reply_text(
-        build_review_text(ud), parse_mode="Markdown", reply_markup=review_keyboard())
+    # plain text (no parse_mode) so hotel names with '*' can't break parsing
+    await message.reply_text(build_review_text(ud), reply_markup=review_keyboard())
 
 
 async def finalize(update: Update, context: ContextTypes.DEFAULT_TYPE):
