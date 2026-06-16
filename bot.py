@@ -34,6 +34,7 @@ VEHICLES = RATES["vehicles"]
 TRANSPORT = RATES["transport"]
 SUV = RATES.get("suv", {"cost": 20000, "capacity": 5, "tour_keyword": "kaindy"})
 DRIVER_STAY = RATES.get("driver_stay", {"solo": 15000, "both": 30000})
+SHYMBULAK_CAB = RATES.get("shymbulak_cab", {"cost": 4000, "capacity": 4, "hotel_keyword": "Shymbulak Ski Resort Hotel"})
 TOUR_LIST = list(TRANSPORT.keys())
 
 ARRIVAL_TOURS = [t for t in TOUR_LIST if t.lower().startswith("arrival")]
@@ -292,6 +293,18 @@ def calculate(data):
     stay_rate = DRIVER_STAY["both"] if vehicle_has_guide else DRIVER_STAY["solo"]
     driver_stay_total = kolsay_nights * stay_rate
 
+    # Shymbulak return cab (once per stay, passengers ÷ 4)
+    shymbulak_cab_total = 0
+    shymbulak_cab_count = 0
+    if mode == "include":
+        shymbulak_selected = any(
+            HOTELS["Shymbulak"][hi]["name"] == SHYMBULAK_CAB["hotel_keyword"]
+            for hi in sel.get("Shymbulak", [])
+        )
+        if shymbulak_selected:
+            shymbulak_cab_count = math.ceil(data["seat_count"] / SHYMBULAK_CAB["capacity"])
+            shymbulak_cab_total = shymbulak_cab_count * SHYMBULAK_CAB["cost"]
+
     lunches, dinners, galas = data["lunches"], data["dinners"], data["galas"]
     meals_per_pax = lunches * MEALS["lunch"] + dinners * MEALS["dinner"] + galas * MEALS["gala"]
 
@@ -312,7 +325,7 @@ def calculate(data):
     water_per_pax = MEALS["water_per_day"] * days
     markup = data["markup"]
 
-    shared_total = transport_total + extra_minivan_total + shared_flat + suv_total + driver_stay_total
+    shared_total = transport_total + extra_minivan_total + shared_flat + suv_total + driver_stay_total + shymbulak_cab_total
     shared_per_adult = shared_total / adult_count if adult_count else 0
 
     def to_usd(kzt):
@@ -333,6 +346,8 @@ def calculate(data):
         "suv_count": suv_count,
         "driver_stay_total": driver_stay_total,
         "kolsay_nights": kolsay_nights,
+        "shymbulak_cab_total": shymbulak_cab_total,
+        "shymbulak_cab_count": shymbulak_cab_count,
         "shared_flat": shared_flat,
         "shared_per_adult": shared_per_adult,
         "tickets_per_pax": tickets_per_pax,
@@ -434,6 +449,8 @@ def build_pdf(code, data, calc):
         s.append(Paragraph("• 4x4 SUV transfer at Kaindy Lake", body))
     if calc.get("kolsay_nights"):
         s.append(Paragraph("• Driver/guide overnight stay at Kolsay", body))
+    if calc.get("shymbulak_cab_count"):
+        s.append(Paragraph("• Return cab transfer at Shymbulak", body))
     s.append(Paragraph("• Daily water", body))
     if paying or cc["free"]:
         s.append(Spacer(1, 6))
@@ -475,10 +492,12 @@ def send_hidden_email(code, data, calc, pdf_path):
         lines.append(f"SUV at Kaindy ({calc['suv_count']} x {fmt_kzt(SUV['cost'])}): {fmt_kzt(calc['suv_total'])}")
     if calc.get("driver_stay_total"):
         lines.append(f"Driver/guide Kolsay stay ({calc['kolsay_nights']} night(s)): {fmt_kzt(calc['driver_stay_total'])}")
+    if calc.get("shymbulak_cab_total"):
+        lines.append(f"Shymbulak return cab ({calc['shymbulak_cab_count']} x {fmt_kzt(SHYMBULAK_CAB['cost'])}): {fmt_kzt(calc['shymbulak_cab_total'])}")
     if calc["shared_flat"]:
         lines.append(f"DJ / Dancers: {fmt_kzt(calc['shared_flat'])}")
     lines += [
-        f"Shared total: {fmt_kzt(calc['transport_total'] + calc['extra_minivan_total'] + calc['shared_flat'] + calc['suv_total'] + calc['driver_stay_total'])}",
+        f"Shared total: {fmt_kzt(calc['transport_total'] + calc['extra_minivan_total'] + calc['shared_flat'] + calc['suv_total'] + calc['driver_stay_total'] + calc['shymbulak_cab_total'])}",
         f"Per adult (÷{calc['adult_count']}): {fmt_kzt(calc['shared_per_adult'])}",
         "",
         "-- TICKETS (per pax, full) --",
