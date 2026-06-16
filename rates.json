@@ -1,17 +1,26 @@
 {
-  "hotels": [
-    {"name": "Regardal 3*", "single": 31000, "double": 33000, "triple": 45000, "payment": "Cash"},
-    {"name": "Best Western 4*", "single": 45000, "double": 55000, "triple": 75000, "payment": "Bank"},
-    {"name": "Ramada 4*", "single": 45000, "double": 51000, "triple": 62000, "payment": "Cash"},
-    {"name": "Holiday Inn 4*", "single": 50000, "double": 55000, "triple": 65000, "payment": "Bank"},
-    {"name": "Rahat Palace 4*", "single": 60000, "double": 72000, "triple": 84000, "payment": "Bank"},
-    {"name": "Rixos 5*", "single": 130000, "double": 145000, "triple": 160000, "payment": "Bank"},
-    {"name": "Novotel City Center 4*", "single": 80000, "double": 88000, "triple": null, "payment": "Bank"},
-    {"name": "Novotel Living Jetisu 4*", "single": 76000, "double": 86000, "triple": null, "payment": "Bank"},
-    {"name": "Grand Mildom 4*", "single": 40000, "double": 45000, "triple": null, "payment": "Cash"},
-    {"name": "Mildom Residence 4*", "single": 35000, "double": 40000, "triple": null, "payment": "Cash"},
-    {"name": "Sadu by Radisson 4*", "single": 52000, "double": 58000, "triple": null, "payment": "Bank"}
-  ],
+  "hotels": {
+    "Almaty": [
+      {"name": "Regardal 3*", "single": 31000, "double": 33000, "triple": 45000, "payment": "Cash"},
+      {"name": "Best Western 4*", "single": 45000, "double": 55000, "triple": 75000, "payment": "Bank"},
+      {"name": "Ramada 4*", "single": 45000, "double": 51000, "triple": 62000, "payment": "Cash"},
+      {"name": "Holiday Inn 4*", "single": 50000, "double": 55000, "triple": 65000, "payment": "Bank"},
+      {"name": "Rahat Palace 4*", "single": 60000, "double": 72000, "triple": 84000, "payment": "Bank"},
+      {"name": "Rixos 5*", "single": 130000, "double": 145000, "triple": 160000, "payment": "Bank"},
+      {"name": "Novotel City Center 4*", "single": 80000, "double": 88000, "triple": null, "payment": "Bank"},
+      {"name": "Novotel Living Jetisu 4*", "single": 76000, "double": 86000, "triple": null, "payment": "Bank"},
+      {"name": "Grand Mildom 4*", "single": 40000, "double": 45000, "triple": null, "payment": "Cash"},
+      {"name": "Mildom Residence 4*", "single": 35000, "double": 40000, "triple": null, "payment": "Cash"},
+      {"name": "Sadu by Radisson 4*", "single": 52000, "double": 58000, "triple": null, "payment": "Bank"}
+    ],
+    "Shymbulak": [
+      {"name": "Shymbulak Ski Resort Hotel", "single": 50000, "double": 55000, "triple": 75000, "payment": "Bank"}
+    ],
+    "Kolsay": [
+      {"name": "Kolsay Guest House", "single": 15000, "double": null, "triple": null, "payment": "Cash"},
+      {"name": "Kolsay Hotel", "single": 40000, "double": 50000, "triple": 60000, "payment": "Cash"}
+    ]
+  },
   "tickets": {
     "Kok Tobe": 8000,
     "Shymbulak": 12000,
@@ -30,6 +39,7 @@
     "water_per_day": 500
   },
   "suv": {"cost": 20000, "capacity": 5, "tour_keyword": "kaindy"},
+  "driver_stay": {"solo": 15000, "both": 30000},
   "vehicles": [
     {"name": "Sedan, Non-English Driver", "capacity": "1-3 pax", "col": 0, "english": false, "max": 3},
     {"name": "Sedan, English Speaking Driver", "capacity": "1-3 pax", "col": 1, "english": true, "max": 3},
@@ -37,26 +47,29 @@
     {"name": "Mini Van, English Speaking Driver", "capacity": "1-5 pax", "col": 3, "english": true, "max": 5},
     {"name": "Toyota Hiace, English Speaking Driver", "capacity": "1-9 pax", "col": 4, "english": true, "max": 9},
     {"name": "Toyota Hiace, Driver + Guide", "capacity": "1-9 pax", "col": 5, "english": true, "max": 9},
-    {"name": "Mercedes Sprinter + Guide", "capacity": "1-16 pax", "col": 6, "english": true, "max": 16}
+    {"name": "Mercedes Sprinter, Driver + Guide", "capacity": "1-16 pax", "col": 6, "english": true, "max": 16}
   ],
   "transport": {
     "Arrival transfer": [15000, 15000, 15000, 15000, 15000, 30000, 40000],
     "Arrival transfer + Dinner": [25000, 25000, 25000, 30000, 30000, 45000, 65000],
     "Arrival transfer + Full day": [40000, 50000, 40000, 55000, 75000, 90000, 120000],
+    "Arrival + Kok Tobe": [30000, 35000, 30000, 35000, 45000, 65000, 85000],
     "City tour + Kok Tobe": [30000, 40000, 30000, 45000, 65000, 75000, 100000],
     "Shopping + Kok Tobe": [30000, 40000, 30000, 45000, 65000, 75000, 100000],
-    "City tour + Shymbulak": [30000, 40000, 30000, 45000, 65000, 75000, 100000],
-    "Shopping + Shymbulak": [30000, 40000, 30000, 45000, 65000, 75000, 100000],
+    "City tour Full day": [30000, 40000, 30000, 45000, 65000, 75000, 100000],
+    "Shymbulak Full Day": [30000, 40000, 30000, 45000, 65000, 75000, 100000],
     "Issyk Lake": [43000, 53000, 43000, 58000, 101000, 111000, 146000],
+    "Issyk Lake + Kok Tobe": [43000, 53000, 43000, 58000, 101000, 111000, 146000],
     "Charyn Canyon": [83000, 93000, 83000, 93000, 101000, 126000, 165000],
     "Charyn Canyon + Kolsay Lakes": [106000, 106000, 106000, 111000, 110000, 147000, 220000],
     "Charyn Canyon + Kolsay & Kaindy Lakes": [106000, 106000, 106000, 111000, 110000, 147000, 230000],
+    "Charyn Canyon + Kolsay Lakes (Overnight)": [106000, 106000, 106000, 111000, 110000, 147000, 220000],
+    "Kaindy Lake + Transfer Back to Almaty": [33000, 43000, 33000, 48000, 86000, 96000, 126000],
     "Almarasan Gorge + Shopping": [33000, 43000, 33000, 48000, 86000, 96000, 126000],
     "Almarasan Gorge + Falcon Show": [33000, 43000, 33000, 48000, 86000, 96000, 126000],
     "Shopping Day": [30000, 40000, 30000, 45000, 65000, 75000, 100000],
     "Oi Qaragai Resort": [45000, 50000, 45000, 55000, 80000, 90000, 120000],
     "Ethno Village": [40000, 50000, 40000, 55000, 80000, 90000, 120000],
-    "Leisure Day": [0, 0, 0, 0, 0, 0, 0],
     "Departure transfer": [15000, 15000, 15000, 15000, 15000, 30000, 40000],
     "Departure transfer + Half day": [30000, 35000, 30000, 35000, 45000, 65000, 85000],
     "Departure transfer + Full day": [40000, 50000, 40000, 55000, 75000, 90000, 120000]
