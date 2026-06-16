@@ -383,18 +383,7 @@ def build_pdf(code, data, calc):
                     s.append(Paragraph(f"&nbsp;&nbsp;&nbsp;{label}: {fmt_usd(usd)} per 1 pax", body))
             s.append(Spacer(1, 6))
 
-        # Combined hotel total per room type across all locations
-        totals = {}
-        for loc in calc["hotel_results"]:
-            for h in loc["hotels"]:
-                for label, usd in h["rooms"].items():
-                    totals[label] = totals.get(label, 0) + usd
-        if totals:
-            s.append(Paragraph("<b>Total hotel cost per 1 pax (all locations combined):</b>", body))
-            for label, total in totals.items():
-                s.append(Paragraph(f"&nbsp;&nbsp;&nbsp;{label}: {fmt_usd(total)}", body))
-            s.append(Spacer(1, 6))
-
+        # (no combined total — multiple hotels per location may be shown as alternatives)
         early = " (with early check-in)" if data.get("early_checkin") else " (without early check-in or late check-out)"
         s.append(Paragraph("<b>Inclusions:</b>", body))
         s.append(Paragraph(f"• Accommodation as listed{early}", body))
