@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
                           ContextTypes, MessageHandler, filters)
@@ -32,6 +32,7 @@ TICKETS = RATES["tickets"]
 MEALS = RATES["meals"]
 VEHICLES = RATES["vehicles"]
 TRANSPORT = RATES["transport"]
+DEFAULT_ROE = RATES.get("roe", 470)
 SUV = RATES.get("suv", {"cost": 20000, "capacity": 5, "tour_keyword": "kaindy"})
 DRIVER_STAY = RATES.get("driver_stay", {"solo": 15000, "both": 30000})
 SHYMBULAK_CAB = RATES.get("shymbulak_cab", {"cost": 4000, "capacity": 4, "hotel_keyword": "Shymbulak Ski Resort Hotel"})
@@ -185,15 +186,6 @@ def tour_keyboard(day_num, total_days):
     return InlineKeyboardMarkup(kb)
 
 
-def loc_hotel_keyboard(location, selected):
-    kb = []
-    for i, h in enumerate(HOTELS[location]):
-        check = "✅" if i in selected else "⬜"
-        kb.append([InlineKeyboardButton(f"{check} {h['name']}", callback_data=f"lh_{i}")])
-    kb.append([InlineKeyboardButton("✔️ Confirm", callback_data="lh_confirm")])
-    return InlineKeyboardMarkup(kb)
-
-
 def room_keyboard(selected):
     kb = []
     for i, lab in enumerate(ROOM_LABELS):
@@ -201,13 +193,6 @@ def room_keyboard(selected):
         kb.append([InlineKeyboardButton(f"{check} {lab}", callback_data=f"room_{i}")])
     kb.append([InlineKeyboardButton("✔️ Confirm Rooms", callback_data="room_confirm")])
     return InlineKeyboardMarkup(kb)
-
-
-def hotel_choice_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏨 Include hotel", callback_data="hotelmode_include")],
-        [InlineKeyboardButton("🚗 Land only (guest booked own hotel)", callback_data="hotelmode_land")],
-    ])
 
 
 def yesno_keyboard(prefix):
@@ -220,8 +205,7 @@ def yesno_keyboard(prefix):
 def review_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Generate Proposal", callback_data="gen_proposal")],
-        [InlineKeyboardButton("✏️ Exchange Rate", callback_data="edit_rate"),
-         InlineKeyboardButton("✏️ Markup", callback_data="edit_markup")],
+        [InlineKeyboardButton("✏️ Markup", callback_data="edit_markup")],
         [InlineKeyboardButton("🔄 Start Over", callback_data="new_calc")],
     ])
 
@@ -232,44 +216,39 @@ def calculate(data):
     cc = data["child_counts"]
     days = data["days"]
     rate = data["exchange_rate"]
-    vcol = VEHICLES[data["vehicle"]]["col"]
-    vehicle_has_guide = "guide" in VEHICLES[data["vehicle"]]["name"].lower()
-    mode = data.get("hotel_mode", "include")
+    vehicle = VEHICLES[data["vehicle"]]
     nights_split = data.get("nights_split", {})
     sel = data.get("sel", {})
     rooms_sel = data.get("rooms", [])
 
-    # ----- Hotel part (per location) -----
+    # ----- Hotel part (all hotels included as options, per location) -----
     hotel_results = []
-    if mode == "include":
-        for loc in LOCATIONS:
-            loc_nights = nights_split.get(loc, 0)
-            if loc == "Almaty" and data.get("early_checkin"):
-                loc_nights += 1
-            if loc_nights <= 0:
-                continue
-            loc_hotels = []
-            for hi in sel.get(loc, []):
-                h = HOTELS[loc][hi]
-                rooms = {}
-                for idx, (label, key, occ) in enumerate(
-                        [("Single", "single", 1), ("Double", "double", 2), ("Triple", "triple", 3)]):
-                    if idx not in rooms_sel:
-                        continue
-                    room_rate = h.get(key)
-                    if not room_rate:
-                        continue
-                    per_pax = room_rate / occ * loc_nights
-                    if h["payment"] == "Cash":
-                        per_pax *= 1.04
-                    rooms[label] = math.ceil(per_pax / rate)
-                if rooms:
-                    loc_hotels.append({"name": h["name"], "rooms": rooms, "payment": h["payment"]})
-            if loc_hotels:
-                hotel_results.append({"location": loc, "nights": loc_nights, "hotels": loc_hotels})
+    for loc in LOCATIONS:
+        loc_nights = nights_split.get(loc, 0)
+        if loc == "Almaty" and data.get("early_checkin"):
+            loc_nights += 1
+        if loc_nights <= 0:
+            continue
+        loc_hotels = []
+        for hi in sel.get(loc, []):
+            h = HOTELS[loc][hi]
+            rooms = {}
+            for idx, (label, key, occ) in enumerate(
+                    [("Single", "single", 1), ("Double", "double", 2), ("Triple", "triple", 3)]):
+                if idx not in rooms_sel:
+                    continue
+                room_rate = h.get(key)
+                if not room_rate:
+                    continue
+                # rates already include taxes — no 4% uplift
+                per_pax = room_rate / occ * loc_nights
+                rooms[label] = math.ceil(per_pax / rate)
+            if rooms:
+                loc_hotels.append({"name": h["name"], "rooms": rooms, "payment": h["payment"]})
+        if loc_hotels:
+            hotel_results.append({"location": loc, "nights": loc_nights, "hotels": loc_hotels})
 
-    # ----- Land part -----
-    transport_total = 0
+    # ----- Land part (vehicle-independent pieces) -----
     tickets_per_pax = 0
     ticket_lines = []
     extra_minivan_total = 0
@@ -277,7 +256,6 @@ def calculate(data):
     suv_count = 0
     seats_needed = data.get("seats_needed", data["seat_count"] + 1)
     for tour in data["tours"]:
-        transport_total += TRANSPORT[tour][vcol]
         for tname, tprice in tickets_for_tour(tour):
             tickets_per_pax += tprice
             ticket_lines.append(f"{tname}: {fmt_kzt(tprice)} per pax")
@@ -288,22 +266,18 @@ def calculate(data):
             suv_count += n
             suv_total += n * SUV["cost"]
 
-    # Kolsay driver/guide overnight stay (per Kolsay night)
-    kolsay_nights = nights_split.get("Kolsay", 0) if mode == "include" else 0
-    stay_rate = DRIVER_STAY["both"] if vehicle_has_guide else DRIVER_STAY["solo"]
-    driver_stay_total = kolsay_nights * stay_rate
+    kolsay_nights = nights_split.get("Kolsay", 0)
 
     # Shymbulak return cab (once per stay, passengers ÷ 4)
     shymbulak_cab_total = 0
     shymbulak_cab_count = 0
-    if mode == "include":
-        shymbulak_selected = any(
-            HOTELS["Shymbulak"][hi]["name"] == SHYMBULAK_CAB["hotel_keyword"]
-            for hi in sel.get("Shymbulak", [])
-        )
-        if shymbulak_selected:
-            shymbulak_cab_count = math.ceil(data["seat_count"] / SHYMBULAK_CAB["capacity"])
-            shymbulak_cab_total = shymbulak_cab_count * SHYMBULAK_CAB["cost"]
+    shymbulak_selected = any(
+        HOTELS["Shymbulak"][hi]["name"] == SHYMBULAK_CAB["hotel_keyword"]
+        for hi in sel.get("Shymbulak", [])
+    )
+    if shymbulak_selected:
+        shymbulak_cab_count = math.ceil(data["seat_count"] / SHYMBULAK_CAB["capacity"])
+        shymbulak_cab_total = shymbulak_cab_count * SHYMBULAK_CAB["cost"]
 
     lunches, dinners, galas = data["lunches"], data["dinners"], data["galas"]
     meals_per_pax = lunches * MEALS["lunch"] + dinners * MEALS["dinner"] + galas * MEALS["gala"]
@@ -325,14 +299,31 @@ def calculate(data):
     water_per_pax = MEALS["water_per_day"] * days
     markup = data["markup"]
 
-    shared_total = transport_total + extra_minivan_total + shared_flat + suv_total + driver_stay_total + shymbulak_cab_total
-    shared_per_adult = shared_total / adult_count if adult_count else 0
-
     def to_usd(kzt):
-        return kzt * 1.04 / rate
+        # rates already include taxes — no 4% uplift
+        return kzt / rate
 
-    adult_land_kzt = shared_per_adult + tickets_per_pax + meals_per_pax + alcohol_per_pax + water_per_pax
-    adult_final = math.ceil(to_usd(adult_land_kzt) + markup)
+    # ----- Per driver-variant totals (non-English & English rates given together) -----
+    variants = []
+    for var in vehicle["variants"]:
+        transport_total = sum(TRANSPORT[tour][var["col"]] for tour in data["tours"])
+        stay_rate = DRIVER_STAY["both"] if var.get("guide") else DRIVER_STAY["solo"]
+        driver_stay_total = kolsay_nights * stay_rate
+        shared_total = (transport_total + extra_minivan_total + shared_flat + suv_total
+                        + driver_stay_total + shymbulak_cab_total)
+        shared_per_adult = shared_total / adult_count if adult_count else 0
+        adult_land_kzt = shared_per_adult + tickets_per_pax + meals_per_pax + alcohol_per_pax + water_per_pax
+        variants.append({
+            "label": var["label"],
+            "transport_total": transport_total,
+            "driver_stay_total": driver_stay_total,
+            "shared_total": shared_total,
+            "shared_per_adult": shared_per_adult,
+            "adult_land_kzt": adult_land_kzt,
+            "adult_usd_before_markup": to_usd(adult_land_kzt),
+            "adult_final": math.ceil(to_usd(adult_land_kzt) + markup),
+        })
+
     c510_kzt = 0.5 * tickets_per_pax + 0.5 * meals_per_pax + water_per_pax
     c510_final = math.ceil(to_usd(c510_kzt) + markup)
     c1112_kzt = 0.5 * tickets_per_pax + meals_per_pax + water_per_pax
@@ -340,16 +331,14 @@ def calculate(data):
 
     return {
         "hotel_results": hotel_results,
-        "transport_total": transport_total,
+        "variants": variants,
         "extra_minivan_total": extra_minivan_total,
         "suv_total": suv_total,
         "suv_count": suv_count,
-        "driver_stay_total": driver_stay_total,
         "kolsay_nights": kolsay_nights,
         "shymbulak_cab_total": shymbulak_cab_total,
         "shymbulak_cab_count": shymbulak_cab_count,
         "shared_flat": shared_flat,
-        "shared_per_adult": shared_per_adult,
         "tickets_per_pax": tickets_per_pax,
         "ticket_lines": ticket_lines,
         "meals_per_pax": meals_per_pax,
@@ -358,9 +347,6 @@ def calculate(data):
         "markup": markup,
         "adult_count": adult_count,
         "child_counts": cc,
-        "adult_land_kzt": adult_land_kzt,
-        "adult_usd_before_markup": to_usd(adult_land_kzt),
-        "adult_final": adult_final,
         "c510_final": c510_final,
         "c1112_final": c1112_final,
     }
@@ -387,34 +373,14 @@ def build_pdf(code, data, calc):
         + (f", {cc['free']} infant(s) free" if cc["free"] else ""), body))
     s.append(Spacer(1, 10))
 
-    mode = data.get("hotel_mode", "include")
-    if mode == "include":
-        s.append(Paragraph("A) Hotel Part Cost (nett rate)", h2))
-        for loc in calc["hotel_results"]:
-            s.append(Paragraph(f"<b>{loc['location']} — {loc['nights']} night(s)</b>", body))
-            for h in loc["hotels"]:
-                s.append(Paragraph(f"{h['name']}", body))
-                for label, usd in h["rooms"].items():
-                    s.append(Paragraph(f"&nbsp;&nbsp;&nbsp;{label}: {fmt_usd(usd)} per 1 pax", body))
-            s.append(Spacer(1, 6))
-
-        # (no combined total — multiple hotels per location may be shown as alternatives)
-        early = " (with early check-in)" if data.get("early_checkin") else " (without early check-in or late check-out)"
-        s.append(Paragraph("<b>Inclusions:</b>", body))
-        s.append(Paragraph(f"• Accommodation as listed{early}", body))
-        s.append(Paragraph("• Daily breakfast", body))
-    elif mode == "high_season":
-        s.append(Paragraph("A) Hotel Part Cost", h2))
-        s.append(Paragraph(
-            "September is peak high season. Hotel rates and availability change frequently and "
-            "cannot be quoted automatically. Please confirm actual rates and availability with "
-            "<b>sales@jabe.kz</b>.", body))
+    s.append(Paragraph("A) Land Part Cost", h2))
+    variants = calc["variants"]
+    if len(variants) == 1:
+        s.append(Paragraph(f"<b>Adult: {fmt_usd(variants[0]['adult_final'])} per 1 pax</b>", body))
     else:
-        s.append(Paragraph("A) Hotel Part Cost", h2))
-        s.append(Paragraph("Hotel not included — accommodation arranged directly by the guest.", body))
-
-    s.append(Paragraph("B) Land Part Cost", h2))
-    s.append(Paragraph(f"<b>Adult: {fmt_usd(calc['adult_final'])} per 1 pax</b>", body))
+        s.append(Paragraph("<b>Adult (per 1 pax):</b>", body))
+        for v in variants:
+            s.append(Paragraph(f"&nbsp;&nbsp;&nbsp;<b>{v['label']}: {fmt_usd(v['adult_final'])}</b>", body))
     if cc["half_both"]:
         s.append(Paragraph(f"<b>Child (5-10 y.o.): {fmt_usd(calc['c510_final'])} per 1 pax</b>", body))
     if cc["half_ticket"]:
@@ -425,8 +391,11 @@ def build_pdf(code, data, calc):
     s.append(Paragraph("<b>Inclusions:</b>", body))
     s.append(Paragraph("• All transfers PVT", body))
     veh = VEHICLES[data["vehicle"]]
-    s.append(Paragraph(
-        f"• {'English speaking driver or guide' if veh['english'] else 'Driver (non-English speaking)'} ({veh['name']})", body))
+    if len(veh["variants"]) > 1:
+        drv = " or ".join(v["label"] for v in veh["variants"])
+        s.append(Paragraph(f"• {veh['name']} — {drv} (rates shown above for both)", body))
+    else:
+        s.append(Paragraph(f"• {veh['name']}", body))
     for i, tour in enumerate(data["tours"], 1):
         s.append(Paragraph(f"• Day {i}: {tour}", body))
     if data["lunches"]:
@@ -458,6 +427,28 @@ def build_pdf(code, data, calc):
             "<i>Child pricing: 1-4 y.o. free; 5-10 y.o. 50% off tickets &amp; meals; "
             "11-12 y.o. 50% off tickets; 13 y.o. and above charged as adult.</i>", body))
 
+    # ----- Hotel options on a separate page -----
+    s.append(PageBreak())
+    s.append(Paragraph("B) Hotel Options (per 1 pax, taxes included)", h2))
+    if data.get("is_september"):
+        s.append(Paragraph(
+            "<b>⚠️ September is peak high season — the hotel rates below and availability are "
+            "not guaranteed and must be checked before confirmation.</b>", body))
+        s.append(Spacer(1, 6))
+    for loc in calc["hotel_results"]:
+        s.append(Paragraph(f"<b>{loc['location']} — {loc['nights']} night(s)</b>", body))
+        for h in loc["hotels"]:
+            s.append(Paragraph(f"{h['name']}", body))
+            for label, usd in h["rooms"].items():
+                s.append(Paragraph(f"&nbsp;&nbsp;&nbsp;{label}: {fmt_usd(usd)} per 1 pax", body))
+        s.append(Spacer(1, 6))
+    if not calc["hotel_results"]:
+        s.append(Paragraph("No hotel rates available for the selected room types.", body))
+    early = " (with early check-in)" if data.get("early_checkin") else " (without early check-in or late check-out)"
+    s.append(Paragraph("<b>Hotel inclusions:</b>", body))
+    s.append(Paragraph(f"• Accommodation as listed{early}", body))
+    s.append(Paragraph("• Daily breakfast", body))
+
     issue_date = datetime.now().strftime("%d %B %Y")
     s.append(Spacer(1, 12))
     roe = ParagraphStyle("ROE", parent=body, fontSize=9, textColor="#555555")
@@ -474,32 +465,34 @@ def send_hidden_email(code, data, calc, pdf_path):
     lines = [
         f"Calculation {code}",
         f"Dates: {data['dates_text']} ({data['nights']} nights / {data['days']} days)",
-        f"Hotel mode: {data.get('hotel_mode', 'include')}",
         f"Adults (incl. 13+): {calc['adult_count']} | Children 5-10: {cc['half_both']} | "
         f"Children 11-12: {cc['half_ticket']} | Infants 1-4: {cc['free']}",
         f"Seat count (5+ y.o.): {data['seat_count']}",
-        f"Exchange rate: {data['exchange_rate']} KZT/USD",
+        f"Exchange rate: {data['exchange_rate']} KZT/USD (fixed)",
         f"Vehicle: {VEHICLES[data['vehicle']]['name']}",
         "",
-        "=== COST BREAKDOWN BY PART (KZT, nett — 4% land tax applied at totals) ===",
+        "=== COST BREAKDOWN BY PART (KZT, taxes included in rates) ===",
         "",
-        "-- VEHICLE / TRANSPORT (whole group) --",
-        f"Transport total: {fmt_kzt(calc['transport_total'])}",
+        "-- SHARED EXTRAS (whole group) --",
     ]
     if calc["extra_minivan_total"]:
         lines.append(f"Extra minivan (14+ seats): {fmt_kzt(calc['extra_minivan_total'])}")
     if calc.get("suv_total"):
         lines.append(f"SUV at Kaindy ({calc['suv_count']} x {fmt_kzt(SUV['cost'])}): {fmt_kzt(calc['suv_total'])}")
-    if calc.get("driver_stay_total"):
-        lines.append(f"Driver/guide Kolsay stay ({calc['kolsay_nights']} night(s)): {fmt_kzt(calc['driver_stay_total'])}")
     if calc.get("shymbulak_cab_total"):
         lines.append(f"Shymbulak return cab ({calc['shymbulak_cab_count']} x {fmt_kzt(SHYMBULAK_CAB['cost'])}): {fmt_kzt(calc['shymbulak_cab_total'])}")
     if calc["shared_flat"]:
         lines.append(f"DJ / Dancers: {fmt_kzt(calc['shared_flat'])}")
+    lines.append("")
+    for v in calc["variants"]:
+        lines.append(f"-- TRANSPORT: {v['label']} --")
+        lines.append(f"Transport total: {fmt_kzt(v['transport_total'])}")
+        if v["driver_stay_total"]:
+            lines.append(f"Driver/guide Kolsay stay ({calc['kolsay_nights']} night(s)): {fmt_kzt(v['driver_stay_total'])}")
+        lines.append(f"Shared total: {fmt_kzt(v['shared_total'])}")
+        lines.append(f"Per adult (÷{calc['adult_count']}): {fmt_kzt(v['shared_per_adult'])}")
+        lines.append("")
     lines += [
-        f"Shared total: {fmt_kzt(calc['transport_total'] + calc['extra_minivan_total'] + calc['shared_flat'] + calc['suv_total'] + calc['driver_stay_total'] + calc['shymbulak_cab_total'])}",
-        f"Per adult (÷{calc['adult_count']}): {fmt_kzt(calc['shared_per_adult'])}",
-        "",
         "-- TICKETS (per pax, full) --",
     ]
     lines += ["  " + l for l in calc["ticket_lines"]] or ["  none"]
@@ -512,25 +505,27 @@ def send_hidden_email(code, data, calc, pdf_path):
         f"Alcohol per pax (adults only): {fmt_kzt(calc['alcohol_per_pax'])}",
         f"Water per pax: {fmt_kzt(calc['water_per_pax'])}",
         "",
-        "-- HOTEL (nett, USD per pax, per location) --",
+        "-- HOTEL (USD per pax, taxes included, per location — all options) --",
     ]
-    if data.get("hotel_mode") == "include":
-        for loc in calc["hotel_results"]:
-            lines.append(f"  {loc['location']} ({loc['nights']} night(s)):")
-            for h in loc["hotels"]:
-                rooms = ", ".join(f"{k}: {v}" for k, v in h["rooms"].items())
-                lines.append(f"    {h['name']} [{h['payment']}]: {rooms}")
-    else:
-        lines.append(f"  ({data.get('hotel_mode')})")
+    for loc in calc["hotel_results"]:
+        lines.append(f"  {loc['location']} ({loc['nights']} night(s)):")
+        for h in loc["hotels"]:
+            rooms = ", ".join(f"{k}: {v}" for k, v in h["rooms"].items())
+            lines.append(f"    {h['name']} [{h['payment']}]: {rooms}")
+    if data.get("is_september"):
+        lines.append("  NOTE: September high season — hotel rates/availability not guaranteed, must be checked.")
     lines += [
         "",
         "=== LAND TOTALS (per adult) ===",
-        f"Land subtotal (nett, KZT): {fmt_kzt(calc['adult_land_kzt'])}",
-        f"+ 4% land tax (KZT): {fmt_kzt(calc['adult_land_kzt'] * 1.04)}",
-        f"= before markup (USD, ÷{data['exchange_rate']}): {calc['adult_usd_before_markup']:.2f} USD",
         f"MARKUP: {calc['markup']:.2f} USD per paying pax",
-        f"Adult FINAL: {calc['adult_final']} USD",
     ]
+    for v in calc["variants"]:
+        lines += [
+            f"[{v['label']}]",
+            f"  Land subtotal (KZT, taxes included): {fmt_kzt(v['adult_land_kzt'])}",
+            f"  = before markup (USD, ÷{data['exchange_rate']}): {v['adult_usd_before_markup']:.2f} USD",
+            f"  Adult FINAL: {v['adult_final']} USD",
+        ]
     if cc["half_both"]:
         lines.append(f"Child 5-10 FINAL: {calc['c510_final']} USD")
     if cc["half_ticket"]:
@@ -609,7 +604,7 @@ async def session_expired(query):
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🧮 New Calculation", callback_data="new_calc")]]))
 
 
-STATEFUL_PREFIXES = ("dates_", "hotelmode_", "lh_", "room_", "early_", "veh_", "tour_",
+STATEFUL_PREFIXES = ("dates_", "room_", "early_", "veh_", "tour_",
                      "meals_", "alc_", "dj_", "dnc_", "gen_", "edit_")
 
 
@@ -623,25 +618,9 @@ async def show_vehicle_prompt(send, ud):
     await send(f"Select vehicle type (for {ud['seat_count']} passengers):", reply_markup=kb)
 
 
-async def show_current_location_hotels(query, ud):
-    loc = ud["acc_locs"][ud["acc_idx"]]
-    ud.setdefault("sel", {}).setdefault(loc, [])
-    await query.edit_message_text(
-        f"Select hotel(s) in *{loc}* ({ud['nights_split'][loc]} night(s)):",
-        parse_mode="Markdown", reply_markup=loc_hotel_keyboard(loc, ud["sel"][loc]))
-
-
-async def advance_after_hotels(query, ud):
-    """After all locations' hotels chosen, ask room types."""
-    ud["rooms_selected"] = []
-    ud["step"] = None
-    await query.edit_message_text("Select *room types* to include:",
-                                  parse_mode="Markdown", reply_markup=room_keyboard([]))
-
-
 async def proceed_to_vehicle_or_early(query, ud):
     """After rooms: ask early check-in if Almaty has nights, else vehicle."""
-    if ud.get("hotel_mode") == "include" and ud["nights_split"].get("Almaty", 0) > 0:
+    if ud["nights_split"].get("Almaty", 0) > 0:
         await query.edit_message_text(
             "Include *early check-in* in Almaty? (adds 1 extra night to Almaty hotel cost)",
             parse_mode="Markdown", reply_markup=yesno_keyboard("early"))
@@ -664,69 +643,32 @@ async def button_handler(update, context):
         return
     data = query.data
 
-    if data.startswith(STATEFUL_PREFIXES) and "exchange_rate" not in ud and data != "edit_rate":
+    if data.startswith(STATEFUL_PREFIXES) and "exchange_rate" not in ud:
         await session_expired(query)
         return
 
     if data == "new_calc":
         ud.clear()
-        ud["step"] = "rate"
-        await query.edit_message_text("Enter *exchange rate* (KZT per 1 USD):\nExample: 530", parse_mode="Markdown")
+        ud["exchange_rate"] = DEFAULT_ROE
+        ud["step"] = "adults"
+        await query.edit_message_text(
+            f"ROE is fixed at *{DEFAULT_ROE} KZT/USD*.\n\nHow many *adults*?\nExample: 2", parse_mode="Markdown")
 
     # ----- dates confirmation -----
     elif data == "dates_ok":
+        ud["step"] = "nights_almaty"
+        text = f"Total {ud['nights']} night(s). How many nights in *Almaty*?"
         if ud.get("is_september"):
-            ud["hotel_mode"] = "high_season"
             await query.edit_message_text(
-                "⚠️ September is peak high season. Hotel rates/availability must be confirmed with "
-                "sales@jabe.kz, so the hotel part is excluded. Proceeding with the land package.")
-            await show_vehicle_prompt(
-                lambda text, reply_markup=None: query.message.reply_text(text, reply_markup=reply_markup), ud)
+                "⚠️ September is peak high season — hotel rates & availability are not guaranteed "
+                "and must be checked before confirmation. A reminder will be added to the proposal.")
+            await query.message.reply_text(text, parse_mode="Markdown")
         else:
-            await query.edit_message_text("Will this quote include a hotel, or land only?",
-                                          reply_markup=hotel_choice_keyboard())
+            await query.edit_message_text(text, parse_mode="Markdown")
 
     elif data == "dates_manual":
         ud["step"] = "nights_manual"
         await query.edit_message_text("Enter *number of nights* manually:\nExample: 4", parse_mode="Markdown")
-
-    # ----- hotel mode -----
-    elif data == "hotelmode_include":
-        ud["hotel_mode"] = "include"
-        ud["step"] = "nights_almaty"
-        await query.edit_message_text(
-            f"Total {ud['nights']} night(s). How many nights in *Almaty*?", parse_mode="Markdown")
-
-    elif data == "hotelmode_land":
-        ud["hotel_mode"] = "land_only"
-        ud["sel"] = {}
-        ud["nights_split"] = {}
-        ud["rooms_selected"] = []
-        await show_vehicle_prompt(
-            lambda text, reply_markup=None: query.edit_message_text(text, reply_markup=reply_markup), ud)
-
-    # ----- per-location hotel selection -----
-    elif data.startswith("lh_"):
-        loc = ud["acc_locs"][ud["acc_idx"]]
-        if data == "lh_confirm":
-            if not ud["sel"].get(loc):
-                await query.answer("Select at least one hotel!", show_alert=True)
-                return
-            ud["acc_idx"] += 1
-            if ud["acc_idx"] < len(ud["acc_locs"]):
-                await show_current_location_hotels(query, ud)
-            else:
-                await advance_after_hotels(query, ud)
-        else:
-            i = int(data.split("_")[1])
-            seln = ud["sel"].setdefault(loc, [])
-            if i in seln:
-                seln.remove(i)
-            else:
-                seln.append(i)
-            await query.edit_message_text(
-                f"Select hotel(s) in *{loc}* ({ud['nights_split'][loc]} night(s)):",
-                parse_mode="Markdown", reply_markup=loc_hotel_keyboard(loc, seln))
 
     # ----- room types -----
     elif data.startswith("room_"):
@@ -816,13 +758,6 @@ async def button_handler(update, context):
             return
         await finalize(update, context)
 
-    elif data == "edit_rate":
-        if "exchange_rate" not in ud:
-            await session_expired(query)
-            return
-        ud["step"] = "edit_rate"
-        await query.edit_message_text("Enter the new *exchange rate* (KZT per 1 USD):", parse_mode="Markdown")
-
     elif data == "edit_markup":
         if "markup" not in ud:
             await session_expired(query)
@@ -835,31 +770,25 @@ async def button_handler(update, context):
 def build_review_text(ud):
     cc = ud.get("child_counts", {"free": 0, "half_both": 0, "half_ticket": 0, "adult": 0})
     paying = cc["half_both"] + cc["half_ticket"]
-    veh = VEHICLES[ud["vehicle"]]["name"]
+    veh = VEHICLES[ud["vehicle"]]
+    veh_name = veh["name"] + (" (non-English & English driver rates)" if len(veh["variants"]) > 1 else "")
     lines = [
         "📋 PLEASE REVIEW BEFORE GENERATING:", "",
-        f"Exchange rate: {ud['exchange_rate']} KZT/USD",
+        f"Exchange rate: {ud['exchange_rate']} KZT/USD (fixed)",
         f"Adults: {ud['adult_count']}" + (f", paying children: {paying}" if paying else "")
         + (f", free infants: {cc['free']}" if cc["free"] else ""),
         f"Passengers (5+ y.o.): {ud['seat_count']}",
         f"Dates: {ud['dates_text']} ({ud['nights']}n/{ud['days']}d)",
     ]
-    mode = ud.get("hotel_mode", "include")
-    if mode == "include":
-        split = ud.get("nights_split", {})
-        acc = []
-        for loc in LOCATIONS:
-            if split.get(loc, 0) > 0:
-                names = ", ".join(HOTELS[loc][i]["name"] for i in ud.get("sel", {}).get(loc, []))
-                acc.append(f"{loc} {split[loc]}n: {names}")
-        lines.append("Hotels: " + " | ".join(acc))
-        lines.append("Rooms: " + ", ".join(ROOM_LABELS[i] for i in ud.get("rooms_selected", [])))
-        lines.append(f"Early check-in: {'Yes' if ud.get('early_checkin') else 'No'}")
-    elif mode == "high_season":
-        lines.append("Hotels: SEPTEMBER high season — confirm with sales@jabe.kz")
-    else:
-        lines.append("Hotels: Land only (guest booked own)")
-    lines.append(f"Vehicle: {veh}")
+    split = ud.get("nights_split", {})
+    acc = [f"{loc} {split[loc]}n ({len(ud.get('sel', {}).get(loc, []))} hotel options)"
+           for loc in LOCATIONS if split.get(loc, 0) > 0]
+    lines.append("Hotels (all options included): " + " | ".join(acc))
+    lines.append("Rooms: " + ", ".join(ROOM_LABELS[i] for i in ud.get("rooms_selected", [])))
+    lines.append(f"Early check-in: {'Yes' if ud.get('early_checkin') else 'No'}")
+    if ud.get("is_september"):
+        lines.append("⚠️ September: hotel rates & availability not guaranteed — must be checked")
+    lines.append(f"Vehicle: {veh_name}")
     lines.append("Tours: " + "; ".join(f"D{i+1} {t}" for i, t in enumerate(ud["tours"])))
     lines.append(f"Meals: {ud['lunches']} lunch, {ud['dinners']} dinner, {ud['galas']} gala")
     if ud["galas"] > 0:
@@ -881,7 +810,7 @@ async def finalize(update, context):
         "child_counts": ud["child_counts"], "child_ages": ud.get("child_ages", []),
         "seat_count": ud["seat_count"], "seats_needed": ud["seats_needed"],
         "dates_text": ud["dates_text"], "nights": ud["nights"], "days": ud["days"],
-        "hotel_mode": ud.get("hotel_mode", "include"),
+        "is_september": ud.get("is_september", False),
         "nights_split": ud.get("nights_split", {}), "sel": ud.get("sel", {}),
         "rooms": ud.get("rooms_selected", []), "early_checkin": ud.get("early_checkin", False),
         "vehicle": ud["vehicle"], "tours": ud["tours"],
@@ -894,10 +823,12 @@ async def finalize(update, context):
     pdf_path = build_pdf(code, data, calc)
     msg = update.message or (update.callback_query.message if update.callback_query else None)
 
+    adult_final = (calc["variants"][0]["adult_final"] if len(calc["variants"]) == 1
+                   else " / ".join(str(v["adult_final"]) for v in calc["variants"]))
     try:
         save_quote({"code": code, "created": datetime.now().strftime("%Y-%m-%d %H:%M"),
                     "dates_text": data["dates_text"], "adult_count": data["adult_count"],
-                    "adult_final": calc["adult_final"], "markup": data["markup"]})
+                    "adult_final": adult_final, "markup": data["markup"]})
     except Exception as e:
         print(f"Quote save failed: {e}")
 
@@ -930,15 +861,7 @@ async def message_handler(update, context):
     text = update.message.text.strip()
     reply = update.message.reply_text
 
-    if step == "rate":
-        try:
-            ud["exchange_rate"] = float(text.replace(",", "."))
-            ud["step"] = "adults"
-            await reply("How many *adults*?\nExample: 2", parse_mode="Markdown")
-        except ValueError:
-            await reply("Please enter a number, e.g. 530")
-
-    elif step == "adults":
+    if step == "adults":
         try:
             a = int(text)
             if a < 1:
@@ -1002,14 +925,11 @@ async def message_handler(update, context):
             if nights < 1:
                 raise ValueError
             ud["nights"], ud["days"] = nights, nights + 1
-            ud["step"] = None
             if ud.get("is_september"):
-                ud["hotel_mode"] = "high_season"
-                await reply("⚠️ September is peak high season. Hotel part excluded — confirm with sales@jabe.kz. "
-                            "Proceeding with land package.")
-                await show_vehicle_prompt(lambda t, reply_markup=None: update.message.reply_text(t, reply_markup=reply_markup), ud)
-            else:
-                await reply("Will this quote include a hotel, or land only?", reply_markup=hotel_choice_keyboard())
+                await reply("⚠️ September is peak high season — hotel rates & availability are not guaranteed "
+                            "and must be checked before confirmation. A reminder will be added to the proposal.")
+            ud["step"] = "nights_almaty"
+            await reply(f"Total {nights} night(s). How many nights in *Almaty*?", parse_mode="Markdown")
         except ValueError:
             await reply("Please enter a valid number of nights.")
 
@@ -1045,13 +965,13 @@ async def message_handler(update, context):
             ud["step"] = "nights_almaty"
             return
         ud["nights_split"] = {"Almaty": ud["split_almaty"], "Shymbulak": ud["split_shymbulak"], "Kolsay": n}
-        ud["acc_locs"] = [loc for loc in LOCATIONS if ud["nights_split"][loc] > 0]
-        ud["acc_idx"] = 0
-        ud["sel"] = {}
+        ud["sel"] = {loc: list(range(len(HOTELS[loc])))
+                     for loc in LOCATIONS if ud["nights_split"][loc] > 0}
+        ud["rooms_selected"] = []
         ud["step"] = None
-        loc = ud["acc_locs"][0]
-        await reply(f"Select hotel(s) in *{loc}* ({ud['nights_split'][loc]} night(s)):",
-                    parse_mode="Markdown", reply_markup=loc_hotel_keyboard(loc, []))
+        await reply("All hotel options for each location will be included on a separate page.\n\n"
+                    "Select *room types* to include:",
+                    parse_mode="Markdown", reply_markup=room_keyboard([]))
 
     # ----- meals -----
     elif step == "lunches":
@@ -1098,13 +1018,6 @@ async def message_handler(update, context):
             await show_review(update.message, ud)
         except ValueError:
             await reply("Please enter a number, e.g. 50")
-
-    elif step == "edit_rate":
-        try:
-            ud["exchange_rate"] = float(text.replace(",", "."))
-            await show_review(update.message, ud)
-        except ValueError:
-            await reply("Please enter a number, e.g. 530")
 
     elif step == "edit_markup":
         try:
